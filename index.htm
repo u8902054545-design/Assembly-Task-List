@@ -73,6 +73,7 @@
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2zM3 7h18" />
                 </svg>
                 <p class="text-gray-500 text-xl font-medium">Ждём новые задачи</p>
+                <p id="error-message" class="text-red-500 text-sm mt-4 hidden">Не удалось загрузить задачи.</p>
             </div>
             
         </main>
@@ -80,17 +81,18 @@
     </div>
 
     <script>
-        // === КОНФИГУРАЦИЯ СЕРВЕРА ===
-        // !!! ВСТАВЬ СЮДА СВОЙ URL ВЕБ-ПРИЛОЖЕНИЯ GOOGLE APPS SCRIPT !!!
-        const GAS_WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbz1tuBM_rX0GGayu-oZtMGU1WHraHHbnfLQjL4UB2RABfjFhOSujiSeOd5ush4DD-ST/exec'; 
-
-        // Инициализация элементов DOM
+        // --- 1. Настройка API ---
+        const SERVER_URL = 'https://script.google.com/macros/s/AKfycbyaZSgumwWmcbL4L2IHjWVgmHjUEb8cudqhrJqb5F7w2cdyfSBRRUaly1JrCrteoYDy/exec'; // <-- ЗАМЕНИТЬ НА ВАШ URL!
+        
+        // --- 2. Инициализация DOM-элементов ---
         const tasksContainer = document.getElementById('tasks-container');
         const taskCounter = document.getElementById('task-counter');
         const emptyState = document.getElementById('empty-state');
+        const errorMessage = document.getElementById('error-message');
         
-        // Глобальный массив для хранения состояния задач
+        // Глобальный массив для хранения состояния задач, полученного с сервера
         let tasks = []; 
+        let lastSuccessfulFetchTime = 0;
 
         /**
          * Форматирует общее количество секунд в строку MM:SS.
@@ -107,20 +109,19 @@
         }
 
         /**
-         * Создает HTML-элемент для новой задачи на основе данных, полученных с сервера.
-         * @param {object} taskData { id: string, durationSeconds: number }
+         * Создает HTML-элемент карточки задачи на основе данных с сервера.
+         * @param {object} task Объект задачи с id и durationSeconds.
          */
-        function createTaskElement(taskData) {
-            // 1. Создание HTML кнопки. Применяем p-3 (12px) и rounded-md (6px)
+        function createTaskElement(task) {
             const taskCard = document.createElement('button');
             taskCard.className = 'w-full flex flex-col p-3 task-card-bg rounded-md shadow-lg hover:ring-2 hover:ring-blue-500 transition duration-150 text-left relative';
-            taskCard.id = `task-${taskData.id}`; 
+            taskCard.id = `task-${task.id}`; 
 
-            // Структура карточки:
+            // Вставляем пустые элементы, которые будут обновлены функцией renderTaskDisplay
             taskCard.innerHTML = `
                 <div class="flex items-center justify-between w-full">
                     <span class="font-semibold text-sm text-gray-200">
-                        ${taskData.id}
+                        ${task.id}
                     </span>
                     
                     <span class="timer-display text-xs font-semibold px-3 py-1 rounded-md">
@@ -137,31 +138,64 @@
                     </span>
                 </div>
             `;
-            
-            // Добавляем элемент DOM в объект задачи для быстрого доступа
-            taskData.element = taskCard;
-            
-            return taskData; // Возвращаем обновленный объект задачи с элементом
+            return taskCard;
         }
 
         /**
-         * Сортирует массив задач по оставшемуся времени (по возрастанию - самые срочные вверху).
+         * Применяет стили и текст таймера к HTML-элементу задачи.
+         * @param {HTMLElement} element Элемент карточки задачи.
+         * @param {number} totalSeconds Оставшееся время в секундах.
          */
-        function sortTasks() {
-            tasks.sort((a, b) => a.durationSeconds - b.durationSeconds);
+        function updateTaskDisplay(element, totalSeconds) {
+            const timerDisplay = element.querySelector('.timer-display');
+            const statusMessage = element.querySelector('.status-message');
+            
+            if (!timerDisplay || !statusMessage) return; 
+            
+            // 1. Сброс классов
+            timerDisplay.classList.remove('timer-bg-default', 'timer-bg-warning', 'timer-bg-negative');
+            
+            let displayString = formatTime(totalSeconds);
+
+            // 2. Управление видимостью сообщения
+            if (totalSeconds <= 60) {
+                statusMessage.classList.remove('hidden');
+            } else {
+                statusMessage.classList.add('hidden');
+            }
+
+            // 3. Управление стилями
+            if (totalSeconds < 0) {
+                // C. Просрочка
+                timerDisplay.classList.add('timer-bg-negative');
+                displayString = '+' + displayString; 
+            } else if (totalSeconds <= 60) {
+                // B. Предупреждение
+                timerDisplay.classList.add('timer-bg-warning');
+            } else {
+                // A. Нормальное состояние
+                timerDisplay.classList.add('timer-bg-default');
+            }
+            
+            timerDisplay.textContent = displayString;
         }
 
         /**
-         * Перерисовывает элементы DOM в соответствии с отсортированным массивом задач.
+         * Перерисовывает элементы DOM в соответствии с текущим массивом задач.
          */
         function redrawTasks() {
             // Удаляем все текущие элементы из контейнера
             tasksContainer.innerHTML = '';
             
-            // Добавляем элементы в DOM в отсортированном порядке
+            // Создаем и добавляем элементы в DOM
             tasks.forEach(task => {
-                tasksContainer.appendChild(task.element);
+                const element = createTaskElement(task);
+                tasksContainer.appendChild(element);
+                task.element = element; // Сохраняем ссылку на элемент для быстрого доступа
             });
+
+            // Обновляем счетчик и видимость UI
+            updateTaskCounter();
         }
 
         /**
@@ -180,102 +214,74 @@
                 emptyState.classList.remove('hidden');
             }
         }
-
+        
         /**
-         * Обновляет все активные таймеры каждую секунду.
+         * Обновляет все таймеры каждую секунду, используя локальное смещение времени
+         * на основе данных, полученных с сервера.
          */
-        function updateTimers() {
+        function updateTimersDisplay() {
+            const currentTime = new Date().getTime();
+            
             tasks.forEach(task => {
-                // Уменьшаем оставшееся время
-                task.durationSeconds--;
-                
-                const totalSeconds = task.durationSeconds;
-                const timeText = formatTime(totalSeconds);
-                const timerDisplay = task.element.querySelector('.timer-display');
-                const statusMessage = task.element.querySelector('.status-message');
-                
-                if (!timerDisplay || !statusMessage) return; 
-                
-                // 1. Сброс классов фона и текста
-                timerDisplay.classList.remove('timer-bg-default', 'timer-bg-warning', 'timer-bg-negative');
-                
-                let displayString = timeText;
+                // Рассчитываем, сколько секунд прошло с момента последнего успешного запроса
+                const timeElapsedSeconds = Math.round((currentTime - lastSuccessfulFetchTime) / 1000);
 
-                // 2. Управление видимостью сообщения "Поторопись с задачей"
-                if (totalSeconds <= 60) {
-                    statusMessage.classList.remove('hidden');
-                } else {
-                    statusMessage.classList.add('hidden');
-                }
-
-                // 3. Управление стилями таймера
-                if (totalSeconds < 0) {
-                    // C. Просрочка (Темно-красный фон, Ярко-красный текст, формат +Мин:Сек)
-                    timerDisplay.classList.add('timer-bg-negative');
-                    displayString = '+' + timeText; 
-                } else if (totalSeconds <= 60) {
-                    // B. Предупреждение (Оранжевый фон)
-                    timerDisplay.classList.add('timer-bg-warning');
-                } else {
-                    // A. Нормальное состояние (Темно-синий фон)
-                    timerDisplay.classList.add('timer-bg-default');
-                }
+                // Оставшееся время = (Время с сервера) - (Время, прошедшее с запроса)
+                const currentDuration = task.durationSeconds - timeElapsedSeconds;
                 
-                timerDisplay.textContent = displayString;
+                if (task.element) {
+                    updateTaskDisplay(task.element, currentDuration);
+                }
             });
 
-            // Пересортируем и перерисуем список после каждого обновления времени
-            sortTasks();
-            redrawTasks();
+            // После обновления таймеров, мы не пересортировываем, чтобы сохранить плавность.
+            // Пересортировка и перерисовка будет происходить только при fetchTasksFromServer.
         }
 
         /**
-         * Запрашивает новые задачи с сервера GAS.
+         * Запрашивает актуальный список задач у сервера Google App Script.
          */
-        async function fetchNewTasks() {
-            console.log("Запрос новых задач с сервера Google Apps Script...");
+        async function fetchTasksFromServer() {
             try {
-                const response = await fetch(GAS_WEB_APP_URL);
-                
+                const response = await fetch(`${SERVER_URL}?action=getTasks`);
                 if (!response.ok) {
-                    throw new Error(`Ошибка HTTP: ${response.status}`);
+                    throw new Error(`HTTP error! status: ${response.status}`);
                 }
+                const serverTasks = await response.json();
                 
-                // Получаем массив задач
-                const newTasksData = await response.json(); 
-                
-                // Очищаем текущий список задач
-                tasks = []; 
+                // 1. Обновляем глобальное состояние
+                tasks = serverTasks;
 
-                // Обрабатываем полученные задачи
-                newTasksData.forEach(taskData => {
-                    // Создаем HTML-элемент и добавляем его в массив состояния
-                    tasks.push(createTaskElement(taskData));
-                });
+                // 2. Сохраняем время успешного получения
+                lastSuccessfulFetchTime = new Date().getTime(); 
                 
-                console.log(`Получено и добавлено ${tasks.length} новых задач.`);
+                // 3. Полностью перерисовываем список (это также обновляет счетчик)
+                redrawTasks();
                 
+                errorMessage.classList.add('hidden');
+                console.log(`[Клиент] Задачи успешно загружены. Всего: ${tasks.length}`);
+
             } catch (error) {
-                console.error("Не удалось получить задачи с сервера:", error);
+                console.error("Ошибка при запросе задач с сервера:", error);
+                // Показываем сообщение об ошибке, но не очищаем список
+                errorMessage.classList.remove('hidden'); 
             }
-            
-            // В любом случае обновляем UI после попытки запроса
-            updateTaskCounter();
-            updateTimers(); 
         }
 
         // Инициализация:
         window.onload = function() {
-            // 1. Запускаем ежесекундный таймер для обратного отсчета
-            setInterval(updateTimers, 1000); 
-
-            // 2. Запускаем интервал для ЗАПРОСА новых задач с сервера каждые 5 секунд.
-            setInterval(fetchNewTasks, 5000); 
-
-            // 3. Первый запуск для загрузки начальных задач
-            fetchNewTasks(); 
+            // 1. Запускаем первый запрос немедленно
+            fetchTasksFromServer(); 
             
-            console.log("Клиент: Таймеры и запрос задач с сервера запущены.");
+            // 2. Запускаем регулярный запрос к серверу каждые 5 секунд.
+            // Это обновит список и его сортировку на основе серверных данных.
+            setInterval(fetchTasksFromServer, 5000); 
+
+            // 3. Запускаем ежесекундный таймер для плавного отображения обратного отсчета
+            // между серверными обновлениями (каждые 5 секунд).
+            setInterval(updateTimersDisplay, 1000); 
+            
+            console.log("Клиентский скрипт запущен. Запрос к серверу каждые 5 секунд.");
         };
 
     </script>
